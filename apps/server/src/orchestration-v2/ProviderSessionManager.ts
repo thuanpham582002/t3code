@@ -468,7 +468,10 @@ export const layerWithOptions = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
       ): Effect.Effect<PreparedMcpCredential> =>
-        options.configureMcp === false
+        // Oracle fork: T3's t3-code MCP (delegate_task, preview_*, schedule_*, ...)
+        // is off by default so it stops being injected into every thread's context.
+        // Oracle teams orchestrate from outside T3, so threads need no in-thread MCP.
+        options.configureMcp !== true
           ? Effect.sync((): PreparedMcpCredential => {
               McpProviderSession.clearMcpProviderSession(threadId);
               return { mcpCredentialId: undefined, issued: false };
