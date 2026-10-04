@@ -415,7 +415,8 @@ export const layerWithOptions = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
       ): Effect.Effect<PreparedMcpCredential> =>
-        options.configureMcp === false
+// Oracle fork: disable in-thread T3 MCP unless explicitly enabled.
+        options.configureMcp !== true
           ? mcpSessions
               .clear(threadId)
               .pipe(Effect.as<PreparedMcpCredential>({ mcpCredentialId: undefined, issued: false }))
