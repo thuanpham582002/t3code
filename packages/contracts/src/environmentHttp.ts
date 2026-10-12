@@ -56,6 +56,9 @@ import {
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadTranscript,
+  OrchestrationV2ThreadProjection,
+  OrchestrationV2Run,
+  OrchestrationV2TurnItem,
 } from "./orchestrationV2.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
 import {
@@ -363,6 +366,7 @@ const EnvironmentOrchestrationSnapshotErrors = [
   EnvironmentInternalError,
 ] as const;
 const EnvironmentOrchestrationThreadSnapshotErrors = [
+  EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
@@ -693,6 +697,46 @@ const EnvironmentOrchestrationThreadHistoryErrors = [
 ] as const;
 
 class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
+  .add(
+    HttpApiEndpoint.get("threadControlSnapshot", "/api/orchestration/threads/:threadId/control", {
+      headers: OrchestrationProtocolHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      query: Schema.Struct({
+        statusOnly: Schema.optionalKey(Schema.String),
+        runId: Schema.optionalKey(Schema.String),
+      }),
+      success: Schema.Struct({ projection: OrchestrationV2ThreadProjection }),
+      error: EnvironmentOrchestrationThreadSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("threadControlWait", "/api/orchestration/threads/:threadId/wait", {
+      headers: OrchestrationProtocolHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      query: Schema.Struct({
+        runId: Schema.optionalKey(Schema.String),
+        timeoutMs: Schema.optionalKey(Schema.String),
+      }),
+      success: Schema.Struct({ run: Schema.NullOr(OrchestrationV2Run), timedOut: Schema.Boolean }),
+      error: EnvironmentOrchestrationThreadSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("threadTimelinePage", "/api/orchestration/threads/:threadId/timeline", {
+      headers: OrchestrationProtocolHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      query: Schema.Struct({
+        afterOrdinal: Schema.optionalKey(Schema.String),
+        limit: Schema.optionalKey(Schema.String),
+        view: Schema.optionalKey(Schema.String),
+      }),
+      success: Schema.Struct({
+        items: Schema.Array(OrchestrationV2TurnItem),
+        hasMore: Schema.Boolean,
+      }),
+      error: EnvironmentOrchestrationThreadSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
   .add(
     HttpApiEndpoint.get("shellSnapshot", "/api/orchestration/shell", {
       headers: OrchestrationProtocolHeaders,

@@ -327,6 +327,14 @@ export interface ProjectionRuntimeResponseContext {
 }
 
 export interface ProjectionRecordFilter {
+  readonly recentRunLimit?: number;
+  readonly includeRunId?: RunId;
+  readonly relatedRunIds?: ReadonlyArray<RunId>;
+  readonly turnItemBeforeOrdinal?: number;
+  readonly turnItemAfterOrdinal?: number;
+  readonly turnItemLimit?: number;
+  readonly turnItemPayloadBudgetBytes?: number;
+  readonly runtimeRequestStatuses?: ReadonlyArray<string>;
   readonly messageRoles?: ReadonlyArray<OrchestrationV2ConversationMessage["role"]>;
   readonly turnItemRunId?: RunId;
   readonly messageIds?: ReadonlyArray<MessageId>;
@@ -3098,6 +3106,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           return yield* new ProjectionStoreThreadNotFoundError({ threadId });
         }
 
+        // Control reads fail explicitly before decoding large text. Never silently
+        // truncate a parent instruction or an evidence-bearing result.
+        if (filter?.turnItemPayloadBudgetBytes !== undefined) {
+          const sizes = yield* sql<{ bytes: number }>`
+            SELECT COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0) AS bytes FROM (
+            SELECT payload_json FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}
+              ${filter.turnItemTypes === undefined ? sql`` : sql`AND type IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemTypes)}))`}
+              ${filter.turnItemRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemRunIds.filter((id): id is RunId => id !== null))}))`}
+              ${filter.turnItemBeforeOrdinal === undefined ? sql`` : sql`AND ordinal <= ${filter.turnItemBeforeOrdinal}`}
+              ${filter.turnItemAfterOrdinal === undefined ? sql`` : sql`AND ordinal > ${filter.turnItemAfterOrdinal}`}
+            ORDER BY ordinal ASC, turn_item_id ASC
+            ${filter.turnItemLimit === undefined ? sql`` : sql`LIMIT ${filter.turnItemLimit}`})
+          `;
+          if ((sizes[0]?.bytes ?? 0) > filter.turnItemPayloadBudgetBytes) {
+            return yield* new ProjectionStoreReadError({
+              threadId,
+              cause: new Error("CONTROL_PAYLOAD_BUDGET_EXCEEDED"),
+            });
+          }
+        }
+
         const boundedTurnItemRows =
           (fields !== undefined && !fields.includes("turnItems")) ||
           (window === undefined &&
@@ -3110,9 +3139,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE thread_id = ${threadId}
                   ${filter?.turnItemTypes === undefined ? sql`` : sql`AND type IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemTypes)}))`}
                   ${filter?.turnItemStatuses === undefined ? sql`` : sql`AND status IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemStatuses)}))`}
+                  ${filter?.turnItemBeforeOrdinal === undefined ? sql`` : sql`AND ordinal <= ${filter.turnItemBeforeOrdinal}`}
+                  ${filter?.turnItemAfterOrdinal === undefined ? sql`` : sql`AND ordinal > ${filter.turnItemAfterOrdinal}`}
                   ${filter?.turnItemRunId === undefined ? sql`` : sql`AND run_id = ${filter.turnItemRunId}`}
                   ${filter?.turnItemRunIds === undefined ? sql`` : sql`AND (run_id IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemRunIds.filter((id): id is RunId => id !== null))})) OR (${filter.turnItemRunIds.includes(null) ? 1 : 0} = 1 AND run_id IS NULL))`}
                 ORDER BY ordinal ASC, turn_item_id ASC
+                ${filter?.turnItemLimit === undefined ? sql`` : sql`LIMIT ${filter.turnItemLimit}`}
               `
               : yield* sql<PayloadRow>`
                 ${retainedWindowRows(threadId, window)}
@@ -3267,6 +3299,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             FROM orchestration_v2_projection_runs
             WHERE thread_id = ${threadId}
               ${filter?.runIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.runIds)}))`}
+              ${
+                filter?.recentRunLimit === undefined
+                  ? sql``
+                  : sql`AND (
+                status IN ('queued','preparing','starting','running','waiting') OR run_id = ${filter.includeRunId ?? null}
+                OR run_id IN (SELECT run_id FROM orchestration_v2_projection_runs
+                  WHERE thread_id = ${threadId} AND status != 'queued'
+                    AND NOT (status = 'cancelled' AND json_extract(payload_json, '$.startedAt') IS NULL)
+                  ORDER BY ordinal DESC LIMIT ${filter.recentRunLimit}))`
+              }
             ORDER BY ordinal ASC
           `
               : sql<PayloadRow>`
@@ -3295,6 +3337,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             SELECT payload_json
             FROM orchestration_v2_projection_run_attempts
             WHERE thread_id = ${threadId}
+              ${filter?.relatedRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.relatedRunIds)}))`}
             ORDER BY run_id ASC, attempt_ordinal ASC
           `
               : sql<PayloadRow>`
@@ -3416,6 +3459,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             SELECT payload_json
             FROM orchestration_v2_projection_provider_turns
             WHERE thread_id = ${threadId}
+              ${
+                filter?.relatedRunIds === undefined
+                  ? sql``
+                  : sql`AND run_attempt_id IN (
+                SELECT attempt_id FROM orchestration_v2_projection_run_attempts
+                WHERE thread_id = ${threadId} AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.relatedRunIds)})))`
+              }
             ORDER BY provider_thread_id ASC, ordinal ASC
           `
               : sql<PayloadRow>`
@@ -3433,6 +3483,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             SELECT payload_json
             FROM orchestration_v2_projection_runtime_requests
             WHERE thread_id = ${threadId}
+              ${filter?.runtimeRequestStatuses === undefined ? sql`` : sql`AND status IN (SELECT value FROM json_each(${encodeIdList(filter.runtimeRequestStatuses)}))`}
             ORDER BY created_at ASC, runtime_request_id ASC
           `
               : sql<PayloadRow>`
@@ -7202,6 +7253,10 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 (filter?.turnItemTypes === undefined || filter.turnItemTypes.includes(row.type)) &&
                 (filter?.turnItemStatuses === undefined ||
                   filter.turnItemStatuses.includes(row.status)) &&
+                (filter?.turnItemBeforeOrdinal === undefined ||
+                  row.ordinal <= filter.turnItemBeforeOrdinal) &&
+                (filter?.turnItemAfterOrdinal === undefined ||
+                  row.ordinal > filter.turnItemAfterOrdinal) &&
                 (filter?.turnItemRunId === undefined || filter.turnItemRunId === row.runId),
             ),
             nodes:
@@ -7209,6 +7264,52 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 ? projection.nodes.filter((node) => !isSettledLeafNode(node, projection.runs))
                 : projection.nodes,
           };
+          if (filter?.recentRunLimit !== undefined) {
+            const recent = new Set(
+              selected.runs
+                .filter(
+                  (r) =>
+                    r.status !== "queued" && !(r.status === "cancelled" && r.startedAt === null),
+                )
+                .slice(-filter.recentRunLimit)
+                .map((r) => r.id),
+            );
+            selected.runs = selected.runs.filter(
+              (r) =>
+                recent.has(r.id) ||
+                r.id === filter.includeRunId ||
+                ["queued", "preparing", "starting", "running", "waiting"].includes(r.status),
+            );
+          }
+          if (filter?.relatedRunIds !== undefined) {
+            selected.attempts = projection.attempts.filter((a) =>
+              filter.relatedRunIds!.includes(a.runId),
+            );
+            const ids = new Set(selected.attempts.map((a) => a.id));
+            selected.providerTurns = projection.providerTurns.filter(
+              (t) => t.runAttemptId !== null && ids.has(t.runAttemptId),
+            );
+          }
+          if (filter?.runtimeRequestStatuses !== undefined)
+            selected.runtimeRequests = projection.runtimeRequests.filter((r) =>
+              filter.runtimeRequestStatuses!.includes(r.status),
+            );
+          if (filter?.turnItemLimit !== undefined)
+            selected.turnItems = selected.turnItems.slice(0, filter.turnItemLimit);
+          if (filter?.turnItemPayloadBudgetBytes !== undefined) {
+            const encoded = yield* Effect.forEach(selected.turnItems, (item) =>
+              encodeTurnItemPayload(item),
+            ).pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
+            const bytes = encoded.reduce(
+              (total, row) => total + new TextEncoder().encode(row).byteLength,
+              0,
+            );
+            if (bytes > filter.turnItemPayloadBudgetBytes)
+              return yield* new ProjectionStoreReadError({
+                threadId,
+                cause: "CONTROL_PAYLOAD_BUDGET_EXCEEDED",
+              });
+          }
           return Object.fromEntries([
             ["thread", projection.thread],
             ...fields.map((field) => [field, selected[field]]),
