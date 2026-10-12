@@ -7,6 +7,7 @@ import type {
   ProjectionRecordFilter,
   ProjectionRecords,
 } from "./ProjectionStore.ts";
+import { readControlProjection, readControlTimeline } from "./ThreadControlReads.ts";
 import {
   type ChatAttachment,
   CommandId,
@@ -317,6 +318,14 @@ export interface ThreadManagementServiceShape {
   readonly searchThread: (
     input: OrchestrationV2SearchThreadInput,
   ) => Effect.Effect<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
+  readonly getControlProjection: (
+    threadId: ThreadId,
+    options: Parameters<typeof readControlProjection>[2],
+  ) => ReturnType<typeof readControlProjection>;
+  readonly getControlTimeline: (
+    threadId: ThreadId,
+    options: Parameters<typeof readControlTimeline>[2],
+  ) => ReturnType<typeof readControlTimeline>;
   readonly ensureLegacyTranscript: (
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
@@ -1129,7 +1138,16 @@ const make = Effect.gen(function* () {
     if (failures[0] !== undefined) return yield* Effect.fail(failures[0]);
   });
 
+  const controlRecords = { getThreadRecords: orchestrator.getThreadRecords };
   return ThreadManagementService.of({
+    getControlProjection: (threadId, options) =>
+      ensureProjectionTranscript(threadId).pipe(
+        Effect.andThen(readControlProjection(controlRecords, threadId, options)),
+      ),
+    getControlTimeline: (threadId, options) =>
+      ensureProjectionTranscript(threadId).pipe(
+        Effect.andThen(readControlTimeline(controlRecords, threadId, options)),
+      ),
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
       Stream.unwrap(
