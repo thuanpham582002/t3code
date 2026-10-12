@@ -25,6 +25,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
+import { readControlProjection, readControlTimeline } from "./ThreadControlReads.ts";
 
 const threadId = ThreadId.make("thread:control-reads");
 const providerThreadId = ProviderThreadId.make("provider-thread:control-reads");
@@ -193,6 +194,43 @@ const storageCases = (["sqlite", "memory"] as const).map((storage) => ({
       ? ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))
       : ProjectionStore.layerMemory,
 }));
+
+it.effect(
+  "sqlite: control and paging omit obsolete historical tool output and reject oversize input before decode",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      yield* Effect.forEach(fixtureEvents(now), (event) => store.apply(event), { discard: true });
+      // Invalid historical output makes a full decode fail, but is irrelevant to
+      // status, current-run evidence and parent identity.
+      yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+      (turn_item_id,thread_id,run_id,node_id,type,status,ordinal,updated_at,payload_json)
+      VALUES ('obsolete-tool',${threadId},${runId},${nodeId},'command_execution','completed',1,${DateTime.formatIso(now)},'{"obsolete":"tool"}')`;
+      const reads = { getThreadRecords: store.getThreadRecords };
+      const status = yield* readControlProjection(reads, threadId, { statusOnly: true });
+      assert.equal(status.runs[0]?.id, runId);
+      assert.deepEqual(status.turnItems, []);
+      const context = yield* readControlProjection(reads, threadId, { runId });
+      assert.deepEqual(context.turnItems, []);
+      assert.equal(context.providerTurns[0]?.id, providerTurnId);
+      yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+      (turn_item_id,thread_id,run_id,node_id,type,status,ordinal,updated_at,payload_json)
+      VALUES ('oversize-parent',${threadId},${runId},${nodeId},'user_message','completed',2,${DateTime.formatIso(now)},${"x".repeat(8 * 1024 * 1024 + 1)})`;
+      const failed = yield* Effect.exit(readControlProjection(reads, threadId));
+      assert.equal(failed._tag, "Failure");
+      const page = yield* readControlTimeline(reads, threadId, {
+        afterOrdinal: 2,
+        limit: 1,
+        view: "activity",
+      });
+      assert.deepEqual(page.items, []);
+      assert.equal(page.hasMore, false);
+    }).pipe(
+      Effect.provide(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
+    ),
+);
 
 it.effect.each(storageCases)(
   "$storage: finds the active root turn without an attempt reverse link",

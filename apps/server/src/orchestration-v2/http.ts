@@ -1,6 +1,9 @@
 import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  ThreadId,
+  TurnItemId,
+  RunId,
   type OrchestrationProjectShell,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -8,6 +11,7 @@ import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Semaphore from "effect/Semaphore";
 
 import {
   annotateEnvironmentRequest,
@@ -52,6 +56,7 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const sql = yield* SqlClient.SqlClient;
     const environment = yield* ServerEnvironment.ServerEnvironmentIdentity;
+    const reads = yield* Semaphore.make(2);
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
@@ -95,20 +100,35 @@ export const layer = HttpApiBuilder.group(
         | "orchestration_thread_bounded_snapshot_failed"
         | "orchestration_thread_history_failed",
     ) {
-      return yield* threadManagement.getThreadSnapshot(threadId).pipe(
-        Effect.map((snapshot) => ({
-          ...snapshot,
-          projection: projectThreadProjectionForWire(snapshot.projection),
-        })),
-        Effect.catch(
-          Effect.fnUntraced(function* (error) {
-            if (isThreadNotFound(error)) {
-              return yield* failEnvironmentNotFound("thread_not_found");
-            }
-            return yield* failEnvironmentInternal(failureReason, error);
-          }),
-        ),
+      // Legacy full snapshots have an explicit pre-decode budget. Large histories
+      // must use control or paginated history reads instead of exhausting V8.
+      const size = yield* sql<{
+        bytes: number;
+      }>`SELECT COALESCE(SUM(length(CAST(payload_json AS BLOB))),0) AS bytes
+        FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}`.pipe(
+        Effect.catch((cause) => failEnvironmentInternal(failureReason, cause)),
       );
+      if ((size[0]?.bytes ?? 0) > 8 * 1024 * 1024)
+        return yield* failEnvironmentInternal(
+          "orchestration_thread_snapshot_failed",
+          "Full snapshot exceeds byte budget; use /control or /timeline",
+        );
+      return yield* reads
+        .withPermits(1)(threadManagement.getThreadSnapshot(threadId))
+        .pipe(
+          Effect.map((snapshot) => ({
+            ...snapshot,
+            projection: projectThreadProjectionForWire(snapshot.projection),
+          })),
+          Effect.catch(
+            Effect.fnUntraced(function* (error) {
+              if (isThreadNotFound(error)) {
+                return yield* failEnvironmentNotFound("thread_not_found");
+              }
+              return yield* failEnvironmentInternal(failureReason, error);
+            }),
+          ),
+        );
     });
 
     const loadThreadSnapshotWindow = Effect.fn("http.orchestration.loadThreadSnapshotWindow")(
@@ -149,6 +169,89 @@ export const layer = HttpApiBuilder.group(
     );
 
     return handlers
+      .handle(
+        "threadControlSnapshot",
+        Effect.fn("environment.orchestration.threadControlSnapshot")(function* (args) {
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const projection = yield* reads
+            .withPermits(1)(
+              threadManagement.getControlProjection(args.params.threadId, {
+                statusOnly: args.query.statusOnly === "1",
+                ...(args.query.runId ? { runId: RunId.make(args.query.runId) } : {}),
+              }),
+            )
+            .pipe(
+              Effect.catch(
+                Effect.fnUntraced(function* (cause) {
+                  if (isThreadNotFound(cause))
+                    return yield* failEnvironmentNotFound("thread_not_found");
+                  return yield* failEnvironmentInternal(
+                    "orchestration_thread_snapshot_failed",
+                    cause,
+                  );
+                }),
+              ),
+            );
+          return { projection };
+        }),
+      )
+      .handle(
+        "threadControlWait",
+        Effect.fn("environment.orchestration.threadControlWait")(function* (args) {
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const thread = yield* threadManagement
+            .getThreadRecords(args.params.threadId, [])
+            .pipe(
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_thread_snapshot_failed", cause),
+              ),
+            );
+          const timeoutMs = Number(args.query.timeoutMs ?? 30000);
+          if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60000)
+            return yield* failEnvironmentInvalidRequest("invalid_command");
+          return yield* threadManagement
+            .waitForThread({
+              projectId: thread.thread.projectId,
+              threadId: args.params.threadId,
+              timeoutMs,
+              ...(args.query.runId ? { runId: RunId.make(args.query.runId) } : {}),
+            })
+            .pipe(
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_thread_snapshot_failed", cause),
+              ),
+            );
+        }),
+      )
+      .handle(
+        "threadTimelinePage",
+        Effect.fn("environment.orchestration.threadTimelinePage")(function* (args) {
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const afterOrdinal = Number(args.query.afterOrdinal ?? 0),
+            limit = Number(args.query.limit ?? 200);
+          if (
+            !Number.isInteger(afterOrdinal) ||
+            afterOrdinal < 0 ||
+            !Number.isInteger(limit) ||
+            limit < 1 ||
+            limit > 1000
+          )
+            return yield* failEnvironmentInvalidRequest("invalid_command");
+          return yield* reads
+            .withPermits(1)(
+              threadManagement.getControlTimeline(args.params.threadId, {
+                afterOrdinal,
+                limit,
+                view: args.query.view === "activity" ? "activity" : "messages",
+              }),
+            )
+            .pipe(
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_thread_history_failed", cause),
+              ),
+            );
+        }),
+      )
       .handle(
         "shellSnapshot",
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
