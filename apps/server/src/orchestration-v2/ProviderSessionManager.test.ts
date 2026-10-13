@@ -546,6 +546,7 @@ function layerTest(input: {
     layerConfiguredMcpRegistry,
     McpProviderSessions.layer,
     ProviderSessionManager.layerWithOptions({
+      configureMcp: true,
       idleTimeoutMs: input.idleTimeoutMs,
       ...(input.maxIdlePinMs === undefined ? {} : { maxIdlePinMs: input.maxIdlePinMs }),
     }).pipe(
