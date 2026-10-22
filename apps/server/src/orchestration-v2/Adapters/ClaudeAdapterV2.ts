@@ -165,6 +165,10 @@ import {
 import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+import {
+  CLAUDE_CANCELLATION_INSTRUCTIONS,
+  claudeCancellationDisplayText,
+} from "./claudeCancellation.ts";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import {
   mcpToolPresentation,
@@ -1434,6 +1438,7 @@ export function makeClaudeQueryOptions(input: {
       preset: "claude_code" as const,
       append: [
         buildRuntimeInstructions({ harness: "Claude Code" }) +
+          CLAUDE_CANCELLATION_INSTRUCTIONS +
           (input.mcpServers === undefined
             ? ""
             : T3_CODE_ORCHESTRATION_INSTRUCTIONS + CLAUDE_BACKGROUND_WAIT_INSTRUCTIONS),
@@ -6325,6 +6330,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             input.message,
             input.toolResult.tool_use_id,
           );
+          const cancellationText = claudeCancellationDisplayText({
+            text: claudeNativeToolOutputText(input.output),
+            nonExecutionKind: toolNonExecutionKind,
+            steered:
+              input.context !== null &&
+              (yield* Ref.get(steeredTurns)).has(input.context.providerTurnId),
+          });
           yield* stopTaskOutputTail(toolCall.nativeItemId);
           yield* emitToolCallArtifacts(
             buildToolCallArtifacts({
@@ -6338,7 +6350,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               rootNodeId: toolCall.rootNodeId,
               parentNodeId: toolCall.parentNodeId,
               ordinal: toolCall.ordinal,
-              output: input.output,
+              output:
+                cancellationText === null
+                  ? input.output
+                  : { type: "content_block", value: cancellationText },
               status:
                 toolNonExecutionKind === "cancelled"
                   ? "cancelled"

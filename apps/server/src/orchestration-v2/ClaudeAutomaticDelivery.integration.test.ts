@@ -443,7 +443,17 @@ it.effect.each(deliveries)(
           for (const read of reads) {
             assert.equal(read.status, explicitSteer ? "cancelled" : "completed");
             assert.equal(read.toolNonExecutionKind, explicitSteer ? "cancelled" : undefined);
-            assert.equal(read.type === "dynamic_tool" && read.output === refusal, explicitSteer);
+            if (explicitSteer) {
+              assert.equal(read.type, "dynamic_tool");
+              assert.include(
+                read.type === "dynamic_tool" ? String(read.output) : "",
+                "incoming instruction",
+              );
+              assert.notInclude(
+                read.type === "dynamic_tool" ? String(read.output) : "",
+                "The user doesn't want",
+              );
+            }
           }
           assert.equal(offers.length, 2);
           assert.equal(
