@@ -564,6 +564,7 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
     };
     assert.equal(systemPrompt.type, "preset");
     assert.equal(systemPrompt.preset, "claude_code");
+    assert.include(systemPrompt.append ?? "", "That text alone is not a user refusal");
     assert.include(systemPrompt.append ?? "", "Use `delegate_task`");
     const logged = ClaudeAdapterV2.loggedClaudeQueryOptions(options);
     assert.equal(logged.hasMcpServers, true);
