@@ -15,8 +15,17 @@ describe("Claude full access approvals", () => {
       }),
     );
   });
-  it("keeps asking once the CLI left bypass", () => {
-    for (const livePermissionMode of ["default", "auto", "plan", undefined]) {
+  it("approves after the agent entered plan mode from full access", () => {
+    assert.isTrue(
+      claudeFullAccessAutoApproves({
+        permissionMode: "bypassPermissions",
+        livePermissionMode: "plan",
+        matchedAskRule: undefined,
+      }),
+    );
+  });
+  it("keeps asking once policy moved the CLI off bypass", () => {
+    for (const livePermissionMode of ["default", "auto", "acceptEdits", undefined]) {
       assert.isFalse(
         claudeFullAccessAutoApproves({
           permissionMode: "bypassPermissions",
