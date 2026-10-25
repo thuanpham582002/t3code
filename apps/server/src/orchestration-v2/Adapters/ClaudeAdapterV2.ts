@@ -169,6 +169,7 @@ import {
   CLAUDE_CANCELLATION_INSTRUCTIONS,
   claudeCancellationDisplayText,
 } from "./claudeCancellation.ts";
+import { claudeFullAccessAutoApproves } from "./claudeFullAccess.ts";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import {
   mcpToolPresentation,
@@ -9037,7 +9038,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             } satisfies PermissionResult;
           }
 
-          if (!requiresClaudeApproval(context)) {
+          if (
+            !requiresClaudeApproval(context) ||
+            claudeFullAccessAutoApproves({
+              permissionMode: context.queryPolicy.permissionMode,
+              livePermissionMode: (yield* Ref.get(queryContext))?.permissionMode,
+              matchedAskRule: callbackOptions.matchedAskRule,
+            })
+          ) {
             return {
               behavior: "allow",
               updatedInput: toolInput,

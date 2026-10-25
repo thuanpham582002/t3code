@@ -2619,7 +2619,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* start("/unrestricted");
         assert.equal(harness.getOpenedOptions()?.permissionMode, "bypassPermissions");
         assert.equal(harness.getOpenedOptions()?.allowDangerouslySkipPermissions, true);
-        // Forwarded asks (including ask rules and settings fallback) still need a decision
+        // Oracle fork: full access auto-approves forwarded safety-check asks, including
         // before queued init/status frames arrive.
         for (const { phase, frame } of [
           {
@@ -2655,26 +2655,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               },
             ),
           ).pipe(Effect.forkScoped);
-          const forwardedFirst = yield* Effect.raceFirst(
-            Queue.take(harness.runtimeRequestReceipts).pipe(
-              Effect.map((event) => ({ type: "request", event }) as const),
-            ),
-            Fiber.join(forwardedDecision).pipe(
-              Effect.map((result) => ({ type: "decision", result }) as const),
-            ),
-          );
-          assert.equal(
-            forwardedFirst.type,
-            "request",
-            `CLI-forwarded Bash must ask before the queued ${phase} frame reaches the adapter`,
-          );
-          if (forwardedFirst.type !== "request") return;
-          assert.equal(forwardedFirst.event.runtimeRequest.kind, "command");
-          yield* harness.runtime.respondToRuntimeRequest({
-            requestId: forwardedFirst.event.runtimeRequest.id,
-            decision: "decline",
-          });
-          assert.equal((yield* Fiber.join(forwardedDecision))?.behavior, "deny");
+          assert.equal((yield* Fiber.join(forwardedDecision))?.behavior, "allow");
           yield* harness.offerAndWait(frame);
         }
         yield* finish;
@@ -3283,12 +3264,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           },
         ),
       ).pipe(Effect.forkScoped);
-      const request = yield* Queue.take(harness.runtimeRequestReceipts);
-      yield* harness.runtime.respondToRuntimeRequest({
-        requestId: request.runtimeRequest.id,
-        decision: "accept",
-      });
-      yield* Fiber.join(permission);
+      // Oracle fork: full access auto-approves the forwarded ask.
+      assert.equal((yield* Fiber.join(permission))?.behavior, "allow");
       yield* harness.offerAndWait(
         claudeSdkFrame({
           type: "assistant",
